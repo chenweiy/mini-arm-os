@@ -7,7 +7,7 @@
 #define STACK_SIZE	256
 
 /* Number of user task */
-#define TASK_LIMIT	3
+#define TASK_LIMIT	5
 
 /* USART TXE Flag
  * This flag is cleared when data is written to USARTx_DR and
@@ -71,23 +71,130 @@ void delay(volatile int count)
  * exception return works correctly.
  * http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.dui0552a/Babefdjc.html
  */
-unsigned int *create_task(unsigned int *stack, void (*start)(void))
+
+#define TASK_READY  		0
+#define TASK_WAIT_READ	1
+#define TASK_WAIT_WRITE	2
+#define TASK_WAIT_INTR  	3
+#define TASK_DELAY      		4
+#define TASK_EXIT       		5
+#define PIROIRTY_LIMIT       	5
+
+unsigned int task_count = 0;
+unsigned int current_task = 0;
+unsigned int user_stacks[TASK_LIMIT][STACK_SIZE];
+
+struct list {
+	struct list *prev;
+	struct list *next;
+	unsigned int id;
+};
+
+struct list ready_queue[PIROIRTY_LIMIT + 1];
+
+void queue_init()
 {
+	int i; 
+	for (i = 0; i < PIROIRTY_LIMIT +1; i++)
+	{
+		ready_queue[i].prev = &ready_queue[i];
+		ready_queue[i].next = &ready_queue[i];
+	}
+}
+
+int queue_empty(struct list *list)
+{
+	if ((list -> next) == list)
+		return 1;
+	else return 0;
+}
+
+void queue_push(struct list *list, struct list *new)
+{
+
+	struct list *curr = list;
+	while ((curr -> next) != list) curr = curr -> next;
+	new -> prev = curr;
+	new -> next = list;
+	curr -> next = new;
+	list -> prev = new;
+
+}
+
+void queue_shift(struct list *list)
+{
+	struct list *shift = list -> next;
+	list -> next = (list -> next) -> next;
+	(list -> next) -> prev = list;
+	queue_push(list, shift);
+}
+
+//TCB struct
+struct task_TCB {
+	unsigned int priority;	/*< The priority of the task where 0 is the lowest priority. */
+	unsigned int *sp;	/*< Task stack pointer */
+	unsigned int status;	/*< The status of task. */
+	unsigned int delayTime;	/*< The tick to resume task */
+
+	struct list list;
+};
+
+struct task_TCB TCBs[TASK_LIMIT];
+
+void init_TCB(struct task_TCB *TCBs)
+{
+	int i;
+	
+	for (i = 0; i < TASK_LIMIT; i++) {
+		TCBs[i].delayTime = 0;
+		TCBs[i].priority  = 0;
+	}
+}
+
+unsigned int *create_task( void (*start)(void), int priority)
+{
+
+	static int first = 1;
+	unsigned int *stack = (unsigned int *) user_stacks[task_count];
+
 	stack += STACK_SIZE - 32; /* End of stack, minus what we are about to push */
-	stack[8] = (unsigned int) THREAD_PSP;
-	stack[15] = (unsigned int) start;
-	stack[16] = (unsigned int) 0x01000000; /* PSR Thumb bit */
+	if (first) {
+		stack[8] = (unsigned int) start;
+		first = 0;
+	} else {
+		stack[8] = (unsigned int) THREAD_PSP;
+		stack[15] = (unsigned int) start;
+		stack[16] = (unsigned int) 0x01000000; /* PSR Thumb bit */
+	}
 	stack = activate(stack);
 
-	return stack;
+	TCBs[task_count].sp = stack;
+	TCBs[task_count].priority = priority;
+	TCBs[task_count].status = TASK_READY;
+
+	(TCBs[task_count].list).id = task_count;
+	(TCBs[task_count].list).next = &(TCBs[task_count].list);
+	(TCBs[task_count].list).prev = &(TCBs[task_count].list);
+	queue_push(&(ready_queue[priority]), &TCBs[task_count].list);
+
+	task_count++;
+	return 0;
 }
 
-void task_init(void)
+// void task_init(void)
+// {
+// 	unsigned int null_stacks[32];
+// 	init_activate_env(&null_stacks[32]);
+// }
+
+void idle(void)
 {
-	unsigned int null_stacks[32];
-	init_activate_env(&null_stacks[32]);
-}
+	print_str("idle: Created!\n\r");
+	print_str("idle: Now, return to kernel mode\n\r");
+	syscall();
 
+	while(1);
+}
 void task1_func(void)
 {
 	print_str("task1: Created!\n");
@@ -110,40 +217,120 @@ void task2_func(void)
 	}
 }
 
+void task3_func(void)
+{
+	print_str("task3: Created!\n\r");
+	print_str("task3: Now, return to kernel mode\n\r");
+	syscall();
+	while (1) {
+		print_str("task3: Running...\n\r");
+		delay(5000);
+	}
+}
+
+void task4_func(void)
+{
+	print_str("task4: Created!\n\r");
+	print_str("task4: Now, return to kernel mode\n\r");
+	syscall();
+	while (1) {
+		print_str("task4: Running...\n\r");
+		delay(5000);
+	}
+}
+
+void task5_func(void)
+{
+	print_str("task5: Created!\n\r");
+	print_str("task5: Now, return to kernel mode\n\r");
+	syscall();
+	while (1) {
+		print_str("task5: Running...\n\r");
+		delay(5000);
+	}
+}
+
+void scheduler()
+{
+	while(1)
+	{
+		print_str("OS: Activate next task\n\r");
+		int i;
+
+		// int highest = 0;
+		// for ( i = 0; i < task_count; i++)
+		// {
+		// 	if(TCBs[i].status == TASK_READY)
+		// 	{
+		// 		if (TCBs[i].priority > (unsigned int)highest) {
+		// 			highest = TCBs[i].priority;
+		// 			current_task = i;
+		// 		}
+		// 	}
+		// }
+
+		for (i = PIROIRTY_LIMIT; i >= 0; i--) {
+			if (!queue_empty(&ready_queue[i])) {
+				current_task = (ready_queue[i].next) -> id;
+				queue_shift(&(ready_queue[i]));
+ 			}
+ 		}
+
+
+		TCBs[current_task].sp = activate(TCBs[current_task].sp);
+		print_str("OS: Back to OS\n\r");
+
+	}
+}
+
+
 int main(void)
 {
-	unsigned int user_stacks[TASK_LIMIT][STACK_SIZE];
-	unsigned int *usertasks[TASK_LIMIT];
-	size_t task_count = 0;
-	size_t current_task;
+	// unsigned int user_stacks[TASK_LIMIT][STACK_SIZE];
+	// unsigned int *usertasks[TASK_LIMIT];
+	// size_t task_count = 0;
+	// size_t current_task;
 
 	usart_init();
-
-	task_init();
+	init_TCB(TCBs);
+	queue_init();
+	// task_init();
 
 	print_str("OS: Starting...\n");
 	print_str("OS: First create task 1\n");
-	usertasks[0] = create_task(user_stacks[0], &task1_func);
-	task_count += 1;
-	print_str("OS: Back to OS, create task 2\n");
-	usertasks[1] = create_task(user_stacks[1], &task2_func);
-	task_count += 1;
+	create_task(&task1_func, 2);
 
-	print_str("\nOS: Start round-robin scheduler!\n");
+	print_str("OS: Back to OS, create task 2\n");
+	create_task(&task2_func, 2);
+
+	print_str("OS: Back to OS, create task 3\n\r");
+	create_task(&task3_func, 2);
+	print_str("OS: Back to OS, create task 4\n\r");
+	create_task(&task4_func, 2);
+	print_str("OS: Back to OS, create task 5\n\r");
+	create_task(&task5_func, 2);
+
+	// print_str("OS: Back to OS, create idle task\n\r");
+	// create_task(&idle, 1);
+
+	print_str("\nOS: Start scheduler!\n\r");
 
 	/* SysTick configuration */
 	*SYSTICK_LOAD = (CPU_CLOCK_HZ / TICK_RATE_HZ) - 1UL;
 	*SYSTICK_VAL = 0;
 	*SYSTICK_CTRL = 0x07;
-	current_task = 0;
+	
+	scheduler();
 
-	while (1) {
-		print_str("OS: Activate next task\n");
-		usertasks[current_task] = activate(usertasks[current_task]);
-		print_str("OS: Back to OS\n");
+	// current_task = 0;
 
-		current_task = current_task == (task_count - 1) ? 0 : current_task + 1;
-	}
+	// while (1) {
+	// 	print_str("OS: Activate next task\n");
+	// 	usertasks[current_task] = activate(usertasks[current_task]);
+	// 	print_str("OS: Back to OS\n");
+
+	// 	current_task = current_task == (task_count - 1) ? 0 : current_task + 1;
+	// }
 
 	return 0;
 }

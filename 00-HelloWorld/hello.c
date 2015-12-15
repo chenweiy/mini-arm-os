@@ -21,8 +21,8 @@ void main(void)
 	*(GPIOA_CRL) = 0x00004B00;
 	*(GPIOA_CRH) = 0x44444444;
 
-	*(USART2_CR1) = 0x0000000C;
-	*(USART2_CR1) |= 0x2000;
+	*(USART2_CR1) = 0x0000000C;	//TR,RX ENABLE
+	*(USART2_CR1) |= 0x2000;	//USART ENABLE
 
 	puts("Hello World!\n");
 
