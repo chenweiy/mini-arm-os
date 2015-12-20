@@ -2,6 +2,8 @@
 #include <stdint.h>
 #include "reg.h"
 #include "asm.h"
+#include "host.h"
+
 
 /* Size of our user task stacks in words */
 #define STACK_SIZE	256
@@ -20,6 +22,154 @@
 
 /* 100 ms per tick. */
 #define TICK_RATE_HZ 10
+
+
+/* Initilize user task stack and execute it one time */
+
+/* XXX: Implementation of task creation is a little bit tricky.
+ * We called `activate()` which is returning from exception.
+ * At initial stage, we call `task_init()` to change from the
+ * kernel mode into user mode, then switch to exception mode.
+ * Thus, we can use the same way to initial the task. Don't have
+ * to specially handle the first task. After initializing the
+ * enviroment, we should set `THREAD_PSP` to `lr` to ensure that
+ * exception return works correctly.
+ * http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.dui0552a/Babefdjc.html
+ */
+
+#define TASK_READY  		0
+#define TASK_WAIT_READ	1
+#define TASK_WAIT_WRITE	2
+#define TASK_WAIT_INTR  	3
+#define TASK_DELAY      		4
+#define TASK_EXIT       		5
+#define PIROIRTY_LIMIT       	5
+
+
+unsigned int user_stacks[TASK_LIMIT][STACK_SIZE];
+int tick_count = 0;
+unsigned int task_count = 0;	//create task number
+unsigned int current_task = 0, prev_task = 0;
+int host_handle = 0;
+
+
+//////////////////////////
+//  Trace task 	/////
+////////////////////////
+
+
+ void write( char *buf, int len)
+{
+	host_action(SYS_WRITE, host_handle, (void *)buf, len);
+}
+
+
+unsigned int get_reload()
+{
+	return *(uint32_t *) SYSTICK_LOAD;
+}
+
+unsigned int get_current()
+{
+	return *(uint32_t *) SYSTICK_VAL;
+}
+
+int _snprintf_int(int num, char *buf, int buf_size)
+{
+	int len = 1;
+	char *p;
+	int i = num < 0 ? -num : num;
+
+	for (; i >= 10; i /= 10, len++);
+
+	if (num < 0)
+		len++;
+
+	i = num;
+	p = buf + len - 1;
+	do {
+		if (p < buf + buf_size)
+			*p-- = '0' + i % 10;
+		i /= 10;
+	} while (i != 0);
+
+	if (num < 0)
+		*p = '-';
+
+	return len < buf_size ? len : buf_size;
+}
+
+int snprintf(char *buf, size_t size, const char *format, ...)
+{
+	va_list ap;
+	char *dest = buf;
+	char *last = buf + size;
+	char ch;
+
+	va_start(ap, format);
+	for (ch = *format++; dest < last && ch; ch = *format++) {
+		if (ch == '%') {
+			ch = *format++;
+			switch (ch) {
+			case 's' : {
+					char *str = va_arg(ap, char*);
+					/* strncpy */
+					while (dest < last) {
+						if ((*dest = *str++))
+							dest++;
+						else
+							break;
+					}
+				}
+				break;
+			case 'd' : {
+					int num = va_arg(ap, int);
+					dest += _snprintf_int(num, dest,
+					                      last - dest);
+				}
+				break;
+			case '%' :
+				*dest++ = ch;
+				break;
+			default :
+				return -1;
+			}
+		} else {
+			*dest++ = ch;
+		}
+	}
+	va_end(ap);
+
+	if (dest < last)
+		*dest = 0;
+	else
+		*--dest = 0;
+
+	return dest - buf;
+}
+
+void trace_task_create(unsigned int task,   int priority)
+{
+	char buf[128];
+	int len = snprintf(buf, 128, "task %d %d %d\n", task, priority,
+	                   task);
+	write( buf, len);
+}
+
+void trace_task_switch()
+{
+	char buf[128];
+	int len = snprintf(buf, 128, "switch %d %d %d %d %d %d\n",
+	                   prev_task, current_task,
+	                   tick_count, get_reload(),
+	                   7200000, get_current());
+	write( buf, len);
+}
+
+
+
+
+
 
 void usart_init(void)
 {
@@ -59,30 +209,7 @@ void delay(volatile int count)
 #define THREAD_MSP	0xFFFFFFF9
 #define THREAD_PSP	0xFFFFFFFD
 
-/* Initilize user task stack and execute it one time */
 
-/* XXX: Implementation of task creation is a little bit tricky.
- * We called `activate()` which is returning from exception.
- * At initial stage, we call `task_init()` to change from the
- * kernel mode into user mode, then switch to exception mode.
- * Thus, we can use the same way to initial the task. Don't have
- * to specially handle the first task. After initializing the
- * enviroment, we should set `THREAD_PSP` to `lr` to ensure that
- * exception return works correctly.
- * http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.dui0552a/Babefdjc.html
- */
-
-#define TASK_READY  		0
-#define TASK_WAIT_READ	1
-#define TASK_WAIT_WRITE	2
-#define TASK_WAIT_INTR  	3
-#define TASK_DELAY      		4
-#define TASK_EXIT       		5
-#define PIROIRTY_LIMIT       	5
-
-unsigned int task_count = 0;
-unsigned int current_task = 0;
-unsigned int user_stacks[TASK_LIMIT][STACK_SIZE];
 
 struct list {
 	struct list *prev;
@@ -177,6 +304,8 @@ unsigned int *create_task( void (*start)(void), int priority)
 	(TCBs[task_count].list).prev = &(TCBs[task_count].list);
 	queue_push(&(ready_queue[priority]), &TCBs[task_count].list);
 
+
+	trace_task_create( task_count, priority);
 	task_count++;
 	return 0;
 }
@@ -255,20 +384,11 @@ void scheduler()
 	while(1)
 	{
 		print_str("OS: Activate next task\n\r");
+
+		tick_count ++;
+		prev_task = current_task;
+
 		int i;
-
-		// int highest = 0;
-		// for ( i = 0; i < task_count; i++)
-		// {
-		// 	if(TCBs[i].status == TASK_READY)
-		// 	{
-		// 		if (TCBs[i].priority > (unsigned int)highest) {
-		// 			highest = TCBs[i].priority;
-		// 			current_task = i;
-		// 		}
-		// 	}
-		// }
-
 		for (i = PIROIRTY_LIMIT; i >= 0; i--) {
 			if (!queue_empty(&ready_queue[i])) {
 				current_task = (ready_queue[i].next) -> id;
@@ -290,6 +410,14 @@ int main(void)
 	// unsigned int *usertasks[TASK_LIMIT];
 	// size_t task_count = 0;
 	// size_t current_task;
+
+	//////////////////////////////////////////////////////
+	//  init semihosting	/////////////////////////
+	/////////////////////////////////////////////////////
+	host_handle = host_action(SYS_SYSTEM, "mkdir -p output");
+    	host_handle = host_action(SYS_SYSTEM, "touch output/syslog");
+	host_handle = host_action(SYS_OPEN, "output/syslog", 6);
+
 
 	usart_init();
 	init_TCB(TCBs);
@@ -334,3 +462,13 @@ int main(void)
 
 	return 0;
 }
+
+
+
+
+
+
+
+
+
+
