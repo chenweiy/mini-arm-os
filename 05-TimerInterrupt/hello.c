@@ -38,6 +38,9 @@ void main(void)
 {
 	usart_init();
 
+	*(USART2_CR1) |= 0x20;
+	*((__REG)0xE000E104) = 1<<6; 
+
 	print_str("Hello world!\n");
 
 	/* SysTick configuration */
@@ -51,4 +54,11 @@ void main(void)
 void __attribute__((interrupt)) systick_handler(void)
 {
 	print_str("Interrupt from System Timer\n");
+}
+
+void __attribute__((interrupt("IRQ"))) USART2_handler(void)
+{
+        char str[16] = "Receive =  \n";
+        str[10] = *USART2_DR & 0xff;
+        print_str(str);
 }
